@@ -1,0 +1,3 @@
+@PACKAGE_INIT@
+include("${CMAKE_CURRENT_LIST_DIR}/mpc_coreTargets.cmake")
+check_required_components(path_follow_mpc)

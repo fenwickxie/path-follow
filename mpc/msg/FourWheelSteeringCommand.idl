@@ -1,0 +1,19 @@
+#include "std_msgs/msg/Header.idl"
+
+module path_follow_mpc {
+  module msg {
+    // Axle-equivalent steering, not individual wheel angles/speeds.
+    // stamp: publication time; frame_id: chassis control reference frame.
+    struct FourWheelSteeringCommand {
+      std_msgs::msg::Header header;
+
+      // Body x velocity of the reference point, m/s; not total or wheel speed.
+      double longitudinal_velocity;
+
+      // Radians, left positive for both axles. Equal angles give crab motion;
+      // opposite signs give counter-phase turning; rear=0 gives front-only steering.
+      double front_steering_angle;
+      double rear_steering_angle;
+    };
+  };
+};

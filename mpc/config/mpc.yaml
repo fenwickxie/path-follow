@@ -1,0 +1,80 @@
+# 所有参数均为启动时读取，修改后重启节点；运行中通过 ~/enable 服务启停。
+# ROS 坐标约定：x 向前，y 向左，yaw 逆时针为正；长度 m，时间 s，角度 rad。
+/**:
+  ros__parameters:
+    use_sim_time: false  # 实车 false；仿真/回放有 /clock 时 true，所有节点需统一。
+    enabled: true       # 初始使能；设 false 时上电不接收任务，服务使能后须重发路径。
+
+    # ackermann：阿克曼；differential：差速；omnidirectional：全向；
+    # four_wheel_steering：前后轴独立转角，可反相转弯/同相蟹行，非四轮独立驱动分配。
+    chassis: ackermann
+
+    topics:
+      path: plan                     # 输入 nav_msgs/Path，空消息取消；新消息替换旧任务。
+      odometry: odom                 # 输入 nav_msgs/Odometry，必须有新鲜非零时间戳。
+      command: cmd_vel               # 输出类型由 output.type 决定，驱动必须匹配该类型。
+      prediction: mpc/prediction     # 输出预测 Path，用于 RViz 可视化和排错。
+      status: mpc/status             # 输出 String，包含等待、跟踪、未收敛或停车原因。
+      goal_reached: mpc/goal_reached # 输出 Bool，完成后保持 true，直到新任务/取消/启停。
+
+    frames:
+      tracking: odom  # 固定优化坐标系（odom/map）；输入在其原始时间戳做 TF 变换。
+      base: base_link # 底盘控制参考点；必须等于 Odometry.child_frame_id。
+      # 阿克曼参考点：后轴中心；四轮转向：由前/后轴距离确定，默认两轴中点。
+
+    output:
+      # twist: geometry_msgs/Twist；twist_stamped: TwistStamped；
+      # ackermann: AckermannDriveStamped，仅限 ackermann 模型，保留转角语义；
+      # four_wheel_steering: 本包 FourWheelSteeringCommand，仅限同名模型。
+      # 兼容旧项目默认 twist；推荐转向底盘选原生输出，避免零速时反解转角歧义。
+      type: twist
+
+    qos:
+      path_transient_local: false # true 需发布者支持 transient-local；会收到缓存路径。
+      odom_reliable: false        # 默认 best-effort 兼容传感器；true 需发布者 reliable。
+
+    mpc:
+      horizon: 20            # [2,100]，预测步数；预测时长 = horizon * dt，增加会增大计算量。
+      dt: 0.1                # >0 s，同时是定时器周期（0.1=10Hz），不可只改变模型不改周期。
+      max_iterations: 60     # [1,1000]，数值优化迭代上限，不保证达到全局最优。
+      cost_tolerance: 0.0001 # >0，接受步的绝对代价改善阈值，不是位置容差或梯度范数。
+      progress_search_distance: 2.0 # >0 m，初始化后只在当前弧长前方该范围内匹配路径。
+
+    limits:
+      wheelbase: 0.65             # >0 m，仅阿克曼使用的轴距（前后轴中心距离）。
+      front_axle_distance: 0.325  # >0 m，仅四轮转向：控制参考点到前轴的距离 lf。
+      rear_axle_distance: 0.325   # >0 m，仅四轮转向：控制参考点到后轴的距离 lr。
+      # 四轮转向轴距使用 lf+lr，不使用 wheelbase；里程计和规划路径须对应同一参考点。
+      target_speed: 0.6           # >0 m/s，沿路径参考速度，必须 <= max_vx，初调建议 0.2。
+      max_vx: 1.0                 # >0 m/s，本体纵向速度上限；仅全向模型允许负 vx。
+      max_vy: 0.6                 # >0 m/s，全向横速上限/四轮转向推导横速上限。
+      max_yaw_rate: 1.2           # >0 rad/s，所有模型角速度上限。
+      max_steering: 0.55          # (0,pi/2) rad，阿克曼/四轮转向的前轴等效转角上限。
+      max_rear_steering: 0.55     # (0,pi/2) rad，四轮转向后轴转角上限。
+      max_acceleration: 0.8       # >0 m/s²，相邻 vx 命令变化率；不代表测得的真实加速度。
+      max_lateral_acceleration: 0.8 # >0 m/s²，仅全向独立 vy 的变化率，不是向心加速度。
+      max_yaw_acceleration: 1.5   # >0 rad/s²，差速/全向 yaw_rate 变化率。
+      max_steering_rate: 0.8      # >0 rad/s，阿克曼/四轮转向前轴转角变化率。
+      max_rear_steering_rate: 0.8 # >0 rad/s，四轮转向后轴转角变化率。
+      # 四轮转向的前/后轴角度还会按角速度和横速预算保守收紧，详见 README 公式。
+      # 未使用的模型参数也保留并校验合法性，方便复制配置后切换底盘。
+
+    weights:
+      position: 12.0  # >0，提高后位置贴合更强，但可能使转向更激进。
+      heading: 3.0    # >0，提高后更重视车身朝向；蟹行时按路径点的 yaw 保持朝向。
+      velocity: 1.0   # >0，跟随参考本体速度；太大会牺牲横向误差纠正。
+      effort: 0.05    # >=0，惩罚横速、前转向量、后转角的平方，抑制过度控制。
+      smoothness: 0.3 # >=0，惩罚各控制量相邻步的增量，增大可减小抖动。
+      terminal: 4.0   # >0，预测末步的位置/航向误差额外乘数，非真实终点容差。
+
+    goal:
+      position_tolerance: 0.08 # >0 m，同时检查剩余弧长和机器人到终点的距离。
+      yaw_tolerance: 0.15      # >0 rad，还需车身朝向满足；阿克曼/四轮转向不能原地对齐。
+
+    safety:
+      odom_timeout: 0.5             # >0 s，同时检查时间戳和接收间隔；超时立即请求零速。
+      path_timeout: 0.0             # >=0 s，0=任务持续有效；>0 时路径必须有有效非零时间戳。
+      transform_timeout: 0.03       # >=0 且 <dt，TF 等待上限；无 TF 时不使用静默默认变换。
+      future_stamp_tolerance: 0.1   # >=0 s，允许消息时间戳超前量，不是过期容差。
+      max_path_points: 10000        # >=1，防止单个路径过大阻塞回调。
+      # 故障/取消/完成发零速并回零两轴，绕过正常限斜率；底盘必须独立实现安全停车。
