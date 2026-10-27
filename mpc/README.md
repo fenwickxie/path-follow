@@ -42,6 +42,18 @@ flowchart TB
 
     commands["可配置输出类型<br/>Twist / TwistStamped<br/>AckermannDriveStamped<br/>FourWheelSteeringCommand"]
     driver["底盘驱动<br/>执行器适配、轮级分配、独立命令看门狗"]
+    subgraph sim["通用仿真工具（可选）· path_follow_sim"]
+        scenario["scenario_publisher<br/>路径场景生成"]
+        plant["sim_robot<br/>运动学底盘与执行器滞后"]
+        metrics["metrics_recorder<br/>误差统计与结果判定"]
+        scenario --> path
+        commands --> plant
+        plant --> odom
+        plant --> tf
+        path --> metrics
+        odom --> metrics
+        telemetry --> metrics
+    end
 
     path --> input
     odom --> input
@@ -153,6 +165,68 @@ ros2 launch path_follow_mpc tracking.launch.xml
 ros2 launch path_follow_mpc tracking.launch.xml \
   config:=/absolute/path/robot_mpc.yaml namespace:=robot1
 ```
+
+### 开发与增量构建速查
+
+日常开发可以直接使用 ROS 2 原生构建工具（`colcon`）增量编译，不需要手动清空整个工作区。建议固定一套目录，避免混用不同 `build/install/log` 路径：
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon --log-base build/log build \
+  --base-paths mpc \
+  --build-base build/colcon \
+  --install-base build/install \
+  --packages-select path_follow_mpc \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+source build/install/setup.bash
+```
+
+仅修改代码后通常这几步就够了：**重新 build → 重新 source → 重启节点**。
+
+| 你改动的内容 | 最小建议动作 |
+|---|---|
+| `src/*.cpp`、`include/*.hpp`、`config/*.yaml`、`launch/*.xml` | `colcon build` 后重新 `source`，重启节点 |
+| 新增/修改消息（如 `msg/*.idl`） | `colcon build`（同包依赖会自动重建）后重新 `source` |
+| `CMakeLists.txt` / `package.xml` | 重新 `colcon build`；若依赖变化，先 `rosdep install --from-paths mpc --ignore-src -r -y` |
+| 只改参数值想快速试验 | 复制默认 YAML，启动时用 `config:=/absolute/path/xxx.yaml` 指定 |
+
+如果执行过多个构建目录，请保证测试时使用与运行一致的 install 空间，避免“编译的是新代码，运行的是旧环境”。
+
+### 使用与调试指引（上车前优先看）
+
+常用观测命令：
+
+```bash
+source build/install/setup.bash
+ros2 node info /mpc_tracker
+ros2 param list /mpc_tracker
+ros2 param get /mpc_tracker chassis
+ros2 topic echo /mpc/status
+ros2 topic hz /odom
+ros2 topic echo /cmd_vel
+ros2 run tf2_ros tf2_echo odom base_link
+```
+
+#### 典型调试流程
+
+1. 先确认坐标与语义：`base_link` 是否就是控制参考点；阿克曼应为后轴中心，四轮转向应为 `lf/lr` 定义点。
+2. 用低速小场景验证符号：`target_speed=0.2`，先直线再大半径圆弧。
+3. 看状态话题再改权重：`mpc/status` 会给出停车或降级原因（如 TF 失败、里程计过期、未使能、未收敛）。
+4. 需要可视化时，订阅 `topics.prediction` 在 RViz 对照路径与实际里程计。
+5. 记录复现包时，建议同时录 `plan/odom/cmd_vel/mpc/status/mpc/prediction`：
+
+```bash
+ros2 bag record /plan /odom /cmd_vel /mpc/status /mpc/prediction
+```
+
+#### 实车联调前检查清单
+
+- [ ] 底盘驱动已实现独立命令超时停车与急停；不要把本节点当作唯一安全链路。
+- [ ] 驱动明确区分“角速度”和“转角”（`Twist.angular.z` 永远是角速度）。
+- [ ] 若使用四轮转向，驱动已把前后轴等效角分配到左右轮，不把纵向速度直接当四轮同速。
+- [ ] 实际里程计时间戳单调有效；`use_sim_time` 在全系统一致。
+- [ ] 路径姿态与底盘能力匹配（阿克曼/四轮转向不能原地补末端朝向）。
+- [ ] 低速架空测试通过后再落地，逐步提高 `target_speed`。
 
 相对话题名随命名空间解析；以 `/` 开头的话题名为绝对话题。TF frame 名不会自动添加命名空间。参数为启动时只读，改 YAML 后重启；`use_sim_time` 是 ROS 自带参数。通过只读参数避免运行中切换模型/话题但只更新一半接口。运行中启停请使用服务。
 

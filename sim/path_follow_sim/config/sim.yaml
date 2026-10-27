@@ -1,0 +1,47 @@
+/**:
+  ros__parameters:
+    # ---------- sim_robot：运动学底盘 ----------
+    chassis: ackermann            # 会被 launch 参数覆盖；四种底盘见 README
+    cmd_type: twist               # twist / twist_stamped / ackermann / four_wheel_steering
+    topics:
+      command: cmd_vel            # 订阅：被测算法的输出
+      odometry: odom              # 发布 Odometry；metrics_recorder 同名订阅
+      path: plan                  # metrics_recorder 订阅的路径
+      goal_reached: mpc/goal_reached  # 空字符串=不用完成信号，只靠超时结束
+    frames:
+      odom: odom
+      base: base_link             # 控制参考点；阿克曼=后轴中心
+    publish_tf: true              # 被测算法需要 TF 时保持 true
+    rate: 50.0                    # [Hz] 仿真积分/发布频率
+    cmd_timeout: 0.5              # [s] 超时无指令则自动停车（模拟驱动看门狗）
+    actuator_time_constant: 0.05  # [s] 一阶滞后，0=理想响应；调大可测试算法鲁棒性
+    max_speed: 5.0                # [m/s] 仿真器自身的速度硬限幅
+    wheelbase: 0.65
+    front_axle_distance: 0.325
+    rear_axle_distance: 0.325
+    odom_noise:
+      position: 0.0               # [m] 位置高斯噪声标准差
+      yaw: 0.0                    # [rad] 航向高斯噪声标准差
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      yaw: 0.0
+
+    # ---------- scenario_publisher：测试路径 ----------
+    frame: odom
+    topic: plan
+    spacing: 0.05                 # [m] 路径点间距
+    start_delay: 2.0              # [s] 等待控制器就绪后再发布
+    params:                       # 各场景用到其中一部分，见 scenarios.py
+      x0: 0.0
+      y0: 0.0
+      length: 8.0                 # line / s_curve / lane_change 的纵向长度
+      radius: 3.0                 # arc / circle / figure8 半径（arc 负数=右转）
+      arc_angle: 1.5708
+      amplitude: 1.0              # s_curve 振幅 / lane_change 横向偏移
+
+    # ---------- metrics_recorder：通过判据 ----------
+    settle_time: 0.5
+    limits:
+      max_cross_track: 0.3        # [m] 最大横向误差
+      max_final_error: 0.15       # [m] 终点位置误差
