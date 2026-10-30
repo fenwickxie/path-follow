@@ -23,8 +23,11 @@ CASES = [
 def test_closed_loop(chassis, scenario, keep):
     out = tempfile.mkdtemp()
     env = dict(os.environ, ROS_DOMAIN_ID='174', ROS_LOCALHOST_ONLY='1')
-    cmd = ['ros2', 'launch', 'path_follow_sim', 'sim.launch.py', f'chassis:={chassis}',
+    cmd = ['ros2', 'launch', 'path_follow_sim', 'sim.launch.py', 'backend:=kinematic',
+           'rviz:=false',
+           f'chassis:={chassis}',
            f'scenario:={scenario}', f'keep_heading:={keep}', f'output_dir:={out}', 'timeout:=40.0']
+    cmd.append('exit_on_finish:=true')
     subprocess.run(cmd, env=env, timeout=120, capture_output=True)
     with open(os.path.join(out, 'summary.json')) as f:
         summary = json.load(f)

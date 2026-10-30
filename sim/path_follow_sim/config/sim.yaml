@@ -19,6 +19,17 @@
     wheelbase: 0.65
     front_axle_distance: 0.325
     rear_axle_distance: 0.325
+    # Gazebo 后端独立的物理驱动参数；运动学后端不使用这一段。
+    # 轮距/轮半径由 launch 的 track / wheel_radius 设置。
+    gazebo:
+      command_timeout: 0.5        # [s] 仿真时间，无新命令后轮电机制动
+      wheel_torque: 8.0           # [N m] 每个轮电机的最大力矩
+      steering_torque: 10.0       # [N m] 每个转向电机的最大力矩
+      steering_rate: 2.0          # [rad/s] 轮级转向速度上限
+      steering_limit: 0.8         # [rad] 阿克曼/四轮转向机械限位（全向舵轮可转至 pi）
+      max_speed: 2.0              # [m/s] 本体 vx/vy 输入限值；越界拒绝并停车
+      max_yaw_rate: 2.0           # [rad/s] 输入角速度限值；越界拒绝并停车
+      publish_rate: 50.0          # [Hz] 物理真值里程计/TF/关节状态
     odom_noise:
       position: 0.0               # [m] 位置高斯噪声标准差
       yaw: 0.0                    # [rad] 航向高斯噪声标准差
@@ -30,6 +41,7 @@
     # ---------- scenario_publisher：测试路径 ----------
     frame: odom
     topic: plan
+    transient_local: true        # late joiners (e.g. Pure Pursuit) receive the last path
     spacing: 0.05                 # [m] 路径点间距
     start_delay: 2.0              # [s] 等待控制器就绪后再发布
     params:                       # 各场景用到其中一部分，见 scenarios.py

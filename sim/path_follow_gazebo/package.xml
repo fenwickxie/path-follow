@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>path_follow_gazebo</name>
+  <version>0.1.0</version>
+  <description>Wheel-joint driven Gazebo Classic backend for portable path tracking tests.</description>
+  <maintainer email="dev@example.com">path-follow</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>gazebo_dev</depend>
+  <depend>gazebo_ros</depend>
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>ackermann_msgs</depend>
+  <depend>path_follow_mpc</depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+    <gazebo_ros plugin_path="lib"/>
+  </export>
+</package>

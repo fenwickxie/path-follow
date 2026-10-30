@@ -2,7 +2,7 @@
 
 面向 Ubuntu 22.04 / ROS 2 Humble，支持阿克曼、差速、全向和前后轴独立四轮转向底盘。C++17 控制核心只使用标准库，不依赖 ROS、Eigen 或外部优化器；ROS 适配层单独负责通信、坐标变换与安全状态。ROS 构建默认包含 `ackermann_msgs` 和四轮转向自定义消息，不再需要可选构建开关。
 
-> 这是运动学路径跟踪器，不是避障规划器或安全认证控制器。不包含碰撞约束、轮胎动力学、倒车规划或 Gazebo。上车前必须验证转向符号、制动距离、定位、通信延迟和底盘自身的命令看门狗。
+> 这是运动学路径跟踪器，不是避障规划器或安全认证控制器。不包含碰撞约束或倒车规划。仓库提供独立的 `sim/path_follow_sim` 与可选 `sim/path_follow_gazebo`：前者是轻量运动学仿真，后者驱动 Gazebo Classic 11 中的真实轮/转向关节。Gazebo 可用于物理闭环开发，但不能替代实车验证；上车前必须验证转向符号、制动距离、定位、通信延迟和底盘自身的命令看门狗。
 
 ## 1. 架构
 
@@ -42,19 +42,33 @@ flowchart TB
 
     commands["可配置输出类型<br/>Twist / TwistStamped<br/>AckermannDriveStamped<br/>FourWheelSteeringCommand"]
     driver["底盘驱动<br/>执行器适配、轮级分配、独立命令看门狗"]
-    subgraph sim["通用仿真工具（可选）· path_follow_sim"]
+    select["按测试模式选择一个执行后端<br/>不要同时连接仿真与实车"]
+    vehicle["实车定位/里程计<br/>Odometry + TF"]
+    subgraph sim["通用仿真 · path_follow_sim"]
         scenario["scenario_publisher<br/>路径场景生成"]
-        plant["sim_robot<br/>运动学底盘与执行器滞后"]
+        select_sim["backend:=kinematic 或 gazebo"]
+        plant["sim_robot<br/>快速运动学模型"]
+        gazebo["Gazebo Classic 11<br/>ODE 物理 + 轮关节驱动插件"]
         metrics["metrics_recorder<br/>误差统计与结果判定"]
         scenario --> path
-        commands --> plant
         plant --> odom
         plant --> tf
+        gazebo --> odom
+        gazebo --> tf
+        select --> select_sim
+        select_sim --> plant
+        select_sim --> gazebo
         path --> metrics
         odom --> metrics
         telemetry --> metrics
     end
 
+    commands --> select
+    select -->|"实车测试"| driver
+    driver --> vehicle
+    vehicle --> odom
+    vehicle --> tf
+    select -->|"运动学仿真"| plant
     path --> input
     odom --> input
     tf --> input
@@ -80,17 +94,18 @@ flowchart TB
 - [test_controller.cpp](test/test_controller.cpp)：无 ROS 的运动学、约束和闭环仿真测试。
 - [test_ros_adapter.cpp](test/test_ros_adapter.cpp)：真实 ROS 发布订阅、TF 和服务测试。
 - [FourWheelSteeringCommand.idl](msg/FourWheelSteeringCommand.idl)：前后轴原生控制消息。
+- [path_follow_sim 仿真包](../sim/path_follow_sim/README.md)：运动学与 Gazebo 物理闭环测试工具。
 
 ### 模型与命令语义
 
 状态为 `[x, y, yaw]`，速度均在底盘本体系，单位采用 m、s、rad：
 
-| `chassis` | 优化控制量 | 运动学 | 特性 |
-|---|---|---|---|
-| `ackermann` | `vx, steering` | `yaw_rate = vx * tan(steering) / wheelbase` | 单轨模型、前进、不支持原地转向 |
-| `differential` | `vx, yaw_rate` | `x_dot = vx*cos(yaw), y_dot = vx*sin(yaw)` | 前进、可原地转向 |
-| `omnidirectional` | `vx, vy, yaw_rate` | `x_dot = vx*cos(yaw)-vy*sin(yaw)`，`y_dot = vx*sin(yaw)+vy*cos(yaw)` | 可横移、可负向本体速度 |
-| `four_wheel_steering` | `vx, front_angle, rear_angle` | `yaw_rate = vx*(tan(front)-tan(rear))/(lf+lr)` | 前后轴独立转向，可反相转弯/同相蟹行，前进、不支持原地转向 |
+| `chassis`             | 优化控制量                      | 运动学                                                                   | 特性                                                      |
+| ----------------------- | ------------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------- |
+| `ackermann`           | `vx, steering`                | `yaw_rate = vx * tan(steering) / wheelbase`                            | 单轨模型、前进、不支持原地转向                            |
+| `differential`        | `vx, yaw_rate`                | `x_dot = vx*cos(yaw), y_dot = vx*sin(yaw)`                             | 前进、可原地转向                                          |
+| `omnidirectional`     | `vx, vy, yaw_rate`            | `x_dot = vx*cos(yaw)-vy*sin(yaw)`，`y_dot = vx*sin(yaw)+vy*cos(yaw)` | 可横移、可负向本体速度                                    |
+| `four_wheel_steering` | `vx, front_angle, rear_angle` | `yaw_rate = vx*(tan(front)-tan(rear))/(lf+lr)`                         | 前后轴独立转向，可反相转弯/同相蟹行，前进、不支持原地转向 |
 
 `Control.turn` 在阿克曼/四轮转向模型中是**前轴等效转角**，其他模型中是角速度。
 `Control.rear_turn` 仅在四轮转向中表示后轴等效转角；`Control.vy` 仅在全向模型中作为独立控制量。其他模型的无效控制字段必须为零。
@@ -150,15 +165,8 @@ sum(位置误差² * position + wrap(航向误差)² * heading
 
 ```bash
 source /opt/ros/humble/setup.bash
-sudo apt install ros-humble-ackermann-msgs
-rosdep install --from-paths mpc --ignore-src -r -y
-colcon --log-base build/log build \
-  --base-paths mpc \
-  --build-base build/colcon \
-  --install-base build/install \
-  --packages-select path_follow_mpc \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-source build/install/setup.bash
+colcon build --base-paths mpc sim
+source install/setup.bash
 
 ros2 launch path_follow_mpc tracking.launch.xml
 # 指定自己的配置（建议复制默认文件后修改）：
@@ -166,38 +174,111 @@ ros2 launch path_follow_mpc tracking.launch.xml \
   config:=/absolute/path/robot_mpc.yaml namespace:=robot1
 ```
 
+上面的 `tracking.launch.xml` **只启动 MPC 节点，不会启动仿真器或实车驱动**。下方分别说明如何选择并启动仿真测试或实车测试；每次只连接一个执行后端。
+
 ### 开发与增量构建速查
 
-日常开发可以直接使用 ROS 2 原生构建工具（`colcon`）增量编译，不需要手动清空整个工作区。建议固定一套目录，避免混用不同 `build/install/log` 路径：
+日常开发直接用 ROS 2 原生构建工具增量编译即可，不需要手动清空工作区：
 
 ```bash
 source /opt/ros/humble/setup.bash
-colcon --log-base build/log build \
-  --base-paths mpc \
-  --build-base build/colcon \
-  --install-base build/install \
-  --packages-select path_follow_mpc \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-source build/install/setup.bash
+colcon build --base-paths mpc sim
+source install/setup.bash
 ```
 
-仅修改代码后通常这几步就够了：**重新 build → 重新 source → 重启节点**。
+工作区有 `mpc/` 和 `sim/` 两个源码目录，因此在仓库根目录加 `--base-paths mpc sim`，让 colcon 搜索这两个位置；不需要额外指定构建目录、包名和 CMake 参数。Gazebo 后端需要先安装其系统依赖。仅修改代码后通常执行：**重新 build → 重新 source → 重启节点**。只构建控制器时可用 `colcon build --base-paths mpc sim --packages-up-to path_follow_mpc`。
 
-| 你改动的内容 | 最小建议动作 |
-|---|---|
-| `src/*.cpp`、`include/*.hpp`、`config/*.yaml`、`launch/*.xml` | `colcon build` 后重新 `source`，重启节点 |
-| 新增/修改消息（如 `msg/*.idl`） | `colcon build`（同包依赖会自动重建）后重新 `source` |
-| `CMakeLists.txt` / `package.xml` | 重新 `colcon build`；若依赖变化，先 `rosdep install --from-paths mpc --ignore-src -r -y` |
-| 只改参数值想快速试验 | 复制默认 YAML，启动时用 `config:=/absolute/path/xxx.yaml` 指定 |
+| 你改动的内容                                                          | 最小建议动作                                                                                 |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `src/*.cpp`、`include/*.hpp`、`config/*.yaml`、`launch/*.xml` | `colcon build` 后重新 `source`，重启节点                                                 |
+| 新增/修改消息（如 `msg/*.idl`）                                     | `colcon build`（同包依赖会自动重建）后重新 `source`                                      |
+| `CMakeLists.txt` / `package.xml`                                  | 重新 `colcon build`；若依赖变化，先 `rosdep install --from-paths mpc --ignore-src -r -y` |
+| 只改参数值想快速试验                                                  | 复制默认 YAML，启动时用 `config:=/absolute/path/xxx.yaml` 指定                             |
 
 如果执行过多个构建目录，请保证测试时使用与运行一致的 install 空间，避免“编译的是新代码，运行的是旧环境”。
 
 ### 使用与调试指引（上车前优先看）
 
+#### A. 仿真测试：Gazebo 物理仿真或快速运动学仿真
+
+仿真工具与 MPC 分包维护。首次使用需安装 Gazebo Classic 11 和 ROS 插件（系统上已安装可跳过）：
+
+```bash
+sudo apt install gazebo libgazebo-dev ros-humble-gazebo-ros-pkgs ros-humble-ackermann-msgs
+source /opt/ros/humble/setup.bash
+```
+
+在仓库根目录构建 `mpc` 与 `sim` 下的包（MPC、仿真工具和 Gazebo 轮关节插件）：
+
+```bash
+colcon build --base-paths mpc sim
+source install/setup.bash
+```
+
+默认 `backend:=gazebo`，所以普通启动命令现在会打开 Gazebo GUI。它启动 Gazebo ODE 世界、生成四轮机器人、接通物理驱动插件，并启动 MPC、路径场景与指标记录：
+
+```bash
+# 默认：Gazebo GUI + 阿克曼底盘 + S 弯；测试完成后保留 Gazebo 窗口
+ros2 launch path_follow_sim sim.launch.py \
+  chassis:=ackermann scenario:=s_curve
+
+# Gazebo 四轮转向变道/蟹行
+ros2 launch path_follow_sim sim.launch.py \
+  chassis:=four_wheel_steering scenario:=lane_change keep_heading:=true
+
+# 结果在默认目录；summary.json 的 passed 表示是否通过
+cat /tmp/path_follow_sim/summary.json
+ros2 run path_follow_sim plot_result /tmp/path_follow_sim
+```
+
+默认测试完成后 Gazebo 保持运行，便于观察最终机器人状态；用 `Ctrl+C` 关闭。批量回归时加 `exit_on_finish:=true` 可在结束后自动关闭。无图形桌面或仅需快速算法回归时，显式选择轻量运动学后端：
+
+```bash
+ros2 launch path_follow_sim sim.launch.py \
+  backend:=kinematic chassis:=ackermann scenario:=s_curve
+```
+
+该后端直接积分运动学，耗时短，适合迭代和 CI；Gazebo 后端有碰撞接触、轮胎摩擦、转向/驱动关节力矩和动力学延迟，仿真时钟运行更慢。Gazebo 生成的是本包的参数化机器人 SDF，而不是直接导入 `~/.gazebo` 模型；`sdf_to_params` 可以从现有模型估算几何值，再作为 launch 参数使用。两种后端话题接口一致。
+
+`sim.launch.py` 默认 `launch_controller:=true`，自动启动本项目 MPC。测试**其他算法**时加 `launch_controller:=false`，另开终端启动自己的节点，订阅 `plan`、`odom` 并向 `cmd_vel`（或所选消息类型）发布命令。支持的路径场景有 `line|arc|s_curve|circle|figure8|lane_change`。Gazebo 物理参数（轮距、轮半径、力矩、轮级转向速度、命令超时等）见 `sim/path_follow_sim/config/sim.yaml` 中的 `gazebo` 项。完整参数和接口见 [仿真包说明](../sim/path_follow_sim/README.md)。
+
+Gazebo 模型使用四个独立舵轮模拟全向底盘（不是麦克纳姆轮模型）；差速模型使用左右驱动轮及自由球形支撑。Gazebo 仍是近似模型，不含真实轮胎参数、悬架、传感器噪声模型或车辆安全认证，不能替代实车测试。
+
+#### B. 实车测试：接入真实里程计与底盘驱动
+
+实车流程不启动 `path_follow_sim`，也不启动任何仿真节点。只构建 MPC：
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --base-paths mpc sim --packages-up-to path_follow_mpc
+source install/setup.bash
+```
+
+1. 先启动真实底盘驱动和定位/里程计节点，确认它们发布有效的 `odom`、`odom -> base_link` TF，并确认驱动订阅命令话题。参数和话题应按实际底盘在一份独立 YAML 中配置；不要直接假定默认轴距、参考点或驱动消息类型适用于你的车辆。
+2. 复制 [mpc.yaml](config/mpc.yaml) 为车辆专用配置，设置真实的 `chassis`、`topics.*`、`frames.*`、`output.type`、轴距及四轮转向前/后轴距离、限速和安全参数。实车 `use_sim_time` 必须为 `false`；确认 `enabled` 的启动策略，首次联调建议设为 `false`。
+3. 确认车轮离地或车辆处于可安全停车状态后，启动 MPC。下面只启动控制节点，不会自动启动驱动、定位或路径规划：
+
+```bash
+ros2 launch path_follow_mpc tracking.launch.xml \
+  config:=/absolute/path/robot_mpc.yaml
+```
+
+4. 检查 `ros2 node info /mpc_tracker`、`ros2 topic hz /odom`、`ros2 topic echo /mpc/status`、`ros2 run tf2_ros tf2_echo odom base_link`。若以 `enabled: false` 启动，确认安全后调用启用服务；启用会清除任务，之后还需由规划器重新发布路径：
+
+```bash
+ros2 service call /mpc_tracker/enable std_srvs/srv/SetBool '{data: true}'
+```
+
+5. 确认低速、急停、命令超时停车和转向正负方向，再逐步提高速度。底盘必须有独立命令看门狗和急停；MPC 发布零速不能替代硬件安全措施。停止测试时先安全停车，再按系统流程停止 MPC 与底盘节点。
+
+**严禁同时运行仿真和实车控制到同一套命令话题。** ROS 2 不会自动区分“仿真命令”和“实车命令”；若两个订阅者同时连接，实车驱动可能收到仿真测试的路径跟踪命令。
+
+#### 两种测试共用的调试命令
+
 常用观测命令：
 
 ```bash
-source build/install/setup.bash
+source install/setup.bash
 ros2 node info /mpc_tracker
 ros2 param list /mpc_tracker
 ros2 param get /mpc_tracker chassis
@@ -207,7 +288,7 @@ ros2 topic echo /cmd_vel
 ros2 run tf2_ros tf2_echo odom base_link
 ```
 
-#### 典型调试流程
+典型调试流程：
 
 1. 先确认坐标与语义：`base_link` 是否就是控制参考点；阿克曼应为后轴中心，四轮转向应为 `lf/lr` 定义点。
 2. 用低速小场景验证符号：`target_speed=0.2`，先直线再大半径圆弧。
@@ -219,7 +300,7 @@ ros2 run tf2_ros tf2_echo odom base_link
 ros2 bag record /plan /odom /cmd_vel /mpc/status /mpc/prediction
 ```
 
-#### 实车联调前检查清单
+实车联调前检查清单：
 
 - [ ] 底盘驱动已实现独立命令超时停车与急停；不要把本节点当作唯一安全链路。
 - [ ] 驱动明确区分“角速度”和“转角”（`Twist.angular.z` 永远是角速度）。
@@ -263,13 +344,13 @@ limits:
 
 消息类型为 `path_follow_mpc/msg/FourWheelSteeringCommand`：
 
-| 字段 | 单位 | 含义 |
-|---|---|---|
-| `header.stamp` | ROS 时间 | 发布时间 |
-| `header.frame_id` | 字符串 | 底盘控制参考系 |
-| `longitudinal_velocity` | m/s | 参考点的本体 x 方向速度 |
-| `front_steering_angle` | rad | 前轴等效转角，左转为正 |
-| `rear_steering_angle` | rad | 后轴等效转角，左转为正 |
+| 字段                      | 单位     | 含义                    |
+| ------------------------- | -------- | ----------------------- |
+| `header.stamp`          | ROS 时间 | 发布时间                |
+| `header.frame_id`       | 字符串   | 底盘控制参考系          |
+| `longitudinal_velocity` | m/s      | 参考点的本体 x 方向速度 |
+| `front_steering_angle`  | rad      | 前轴等效转角，左转为正  |
+| `rear_steering_angle`   | rad      | 后轴等效转角，左转为正  |
 
 消息以 ROS 2 原生 IDL 定义，使用 rosidl 生成 C/C++/Python 类型；发布订阅方式与 `.msg` 相同。采用 IDL 是为了避开 Humble 的 `.msg`→IDL 转换工具读取中文构建路径时的兼容问题，不需要移动本项目。Humble 的 `ros2 interface show` 仅按 `.msg/.srv/.action` 查找，不能查看这个仅以 IDL 定义的类型；可使用下列 Python 命令查看字段，消息本身的发布订阅不受影响。
 
@@ -283,16 +364,16 @@ ros2 topic echo /cmd_vel path_follow_mpc/msg/FourWheelSteeringCommand
 
 ## 3. 接口契约
 
-| 配置项 / 服务 | 默认名称 | 类型 | 说明 |
-|---|---|---|---|
-| `topics.path` | `plan` | `nav_msgs/msg/Path` | 新消息替换任务，空路径取消 |
-| `topics.odometry` | `odom` | `nav_msgs/msg/Odometry` | 有效时间戳的底盘位姿 |
-| `topics.command` | `cmd_vel` | 由 `output.type` 决定 | 本体坐标命令，发布深度 1 |
-| `topics.prediction` | `mpc/prediction` | `nav_msgs/msg/Path` | 预测轨迹，在 tracking 坐标系 |
-| `topics.status` | `mpc/status` | `std_msgs/msg/String` | 工作状态与错误原因，transient-local |
-| `topics.goal_reached` | `mpc/goal_reached` | `std_msgs/msg/Bool` | 完成锁存，新路径/取消/启停时复位 |
-| `~/enable` | `/mpc_tracker/enable` | `std_srvs/srv/SetBool` | 禁用时停车清任务；启用后必须重发路径 |
-| `~/clear_path` | `/mpc_tracker/clear_path` | `std_srvs/srv/Empty` | 停车并清任务 |
+| 配置项 / 服务           | 默认名称                    | 类型                      | 说明                                 |
+| ----------------------- | --------------------------- | ------------------------- | ------------------------------------ |
+| `topics.path`         | `plan`                    | `nav_msgs/msg/Path`     | 新消息替换任务，空路径取消           |
+| `topics.odometry`     | `odom`                    | `nav_msgs/msg/Odometry` | 有效时间戳的底盘位姿                 |
+| `topics.command`      | `cmd_vel`                 | 由 `output.type` 决定   | 本体坐标命令，发布深度 1             |
+| `topics.prediction`   | `mpc/prediction`          | `nav_msgs/msg/Path`     | 预测轨迹，在 tracking 坐标系         |
+| `topics.status`       | `mpc/status`              | `std_msgs/msg/String`   | 工作状态与错误原因，transient-local  |
+| `topics.goal_reached` | `mpc/goal_reached`        | `std_msgs/msg/Bool`     | 完成锁存，新路径/取消/启停时复位     |
+| `~/enable`            | `/mpc_tracker/enable`     | `std_srvs/srv/SetBool`  | 禁用时停车清任务；启用后必须重发路径 |
+| `~/clear_path`        | `/mpc_tracker/clear_path` | `std_srvs/srv/Empty`    | 停车并清任务                         |
 
 ```bash
 ros2 service call /mpc_tracker/enable std_srvs/srv/SetBool '{data: false}'
@@ -328,34 +409,34 @@ ros2 topic pub --once /plan nav_msgs/msg/Path \
 
 所有参数均在 [mpc.yaml](config/mpc.yaml) 列全：
 
-| 参数组 | 含义 / 单位 |
-|---|---|
-| `chassis` | `ackermann` / `differential` / `omnidirectional` / `four_wheel_steering` |
-| `frames.tracking`, `frames.base` | 优化全局参考系、底盘控制参考系 |
-| `topics.*`, `output.type`, `qos.*` | 接口名、消息类型和订阅 QoS |
-| `mpc.horizon` | 预测步数 `[2,100]`；预测时长约 `horizon * dt` |
-| `mpc.dt` | s；也是实际定时器周期，不单独设置不一致的控制频率 |
-| `mpc.max_iterations` | 每次求解最大迭代数 `[1,1000]` |
-| `mpc.cost_tolerance` | 正数；一次接受步的绝对代价改善停止阈值 |
-| `mpc.progress_search_distance` | m；初始化后前向匹配搜索范围 |
-| `limits.wheelbase` | m；阿克曼轴距 |
-| `limits.front_axle_distance`, `limits.rear_axle_distance` | m；四轮转向参考点到前/后轴的正距离，其和为轴距 |
-| `limits.target_speed` | m/s；沿路径的期望速度，必须正且不超过 `max_vx` |
-| `limits.max_vx`, `limits.max_vy` | m/s；本体系各方向速度边界 |
-| `limits.max_yaw_rate`, `limits.max_steering` | rad/s、rad；角速度和转角边界 |
-| `limits.max_rear_steering` | rad；四轮转向后轴转角边界，必须在 `(0,pi/2)` |
-| `limits.max_acceleration` | m/s²；`vx` 变化率 |
-| `limits.max_lateral_acceleration` | m/s²；全向 `vy` 变化率，**不是**阿克曼向心加速度约束 |
-| `limits.max_yaw_acceleration`, `limits.max_steering_rate` | rad/s²、rad/s |
-| `limits.max_rear_steering_rate` | rad/s；四轮转向后轴转角变化率 |
-| `weights.*` | 代价权重；effort/smoothness 可为零，其余必须为正 |
-| `goal.position_tolerance`, `goal.yaw_tolerance` | m、rad |
-| `safety.odom_timeout` | s；必须正，建议大于正常里程计周期的 3 倍 |
-| `safety.path_timeout` | s；零表示任务不自动过期 |
-| `safety.transform_timeout` | s；TF 等待上限，必须非负且小于 `dt` |
-| `safety.future_stamp_tolerance` | s；允许时间戳超前量，非负 |
-| `safety.max_path_points` | 单次路径最大点数，避免无界处理 |
-| `enabled` | 初始使能；上电需人工确认时设为 false |
+| 参数组                                                        | 含义 / 单位                                                                      |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `chassis`                                                   | `ackermann` / `differential` / `omnidirectional` / `four_wheel_steering` |
+| `frames.tracking`, `frames.base`                          | 优化全局参考系、底盘控制参考系                                                   |
+| `topics.*`, `output.type`, `qos.*`                      | 接口名、消息类型和订阅 QoS                                                       |
+| `mpc.horizon`                                               | 预测步数 `[2,100]`；预测时长约 `horizon * dt`                                |
+| `mpc.dt`                                                    | s；也是实际定时器周期，不单独设置不一致的控制频率                                |
+| `mpc.max_iterations`                                        | 每次求解最大迭代数 `[1,1000]`                                                  |
+| `mpc.cost_tolerance`                                        | 正数；一次接受步的绝对代价改善停止阈值                                           |
+| `mpc.progress_search_distance`                              | m；初始化后前向匹配搜索范围                                                      |
+| `limits.wheelbase`                                          | m；阿克曼轴距                                                                    |
+| `limits.front_axle_distance`, `limits.rear_axle_distance` | m；四轮转向参考点到前/后轴的正距离，其和为轴距                                   |
+| `limits.target_speed`                                       | m/s；沿路径的期望速度，必须正且不超过 `max_vx`                                 |
+| `limits.max_vx`, `limits.max_vy`                          | m/s；本体系各方向速度边界                                                        |
+| `limits.max_yaw_rate`, `limits.max_steering`              | rad/s、rad；角速度和转角边界                                                     |
+| `limits.max_rear_steering`                                  | rad；四轮转向后轴转角边界，必须在 `(0,pi/2)`                                   |
+| `limits.max_acceleration`                                   | m/s²；`vx` 变化率                                                             |
+| `limits.max_lateral_acceleration`                           | m/s²；全向 `vy` 变化率，**不是**阿克曼向心加速度约束                    |
+| `limits.max_yaw_acceleration`, `limits.max_steering_rate` | rad/s²、rad/s                                                                   |
+| `limits.max_rear_steering_rate`                             | rad/s；四轮转向后轴转角变化率                                                    |
+| `weights.*`                                                 | 代价权重；effort/smoothness 可为零，其余必须为正                                 |
+| `goal.position_tolerance`, `goal.yaw_tolerance`           | m、rad                                                                           |
+| `safety.odom_timeout`                                       | s；必须正，建议大于正常里程计周期的 3 倍                                         |
+| `safety.path_timeout`                                       | s；零表示任务不自动过期                                                          |
+| `safety.transform_timeout`                                  | s；TF 等待上限，必须非负且小于 `dt`                                            |
+| `safety.future_stamp_tolerance`                             | s；允许时间戳超前量，非负                                                        |
+| `safety.max_path_points`                                    | 单次路径最大点数，避免无界处理                                                   |
+| `enabled`                                                   | 初始使能；上电需人工确认时设为 false                                             |
 
 阿克曼为同时保证转角和角速度限制，使用保守的固定转角上限：
 
@@ -398,13 +479,9 @@ rear_limit  = min(max_rear_steering, atan(t))
 ## 6. 验证
 
 ```bash
-# 与上述 colcon 构建目录配套
-colcon --log-base build/log test \
-  --base-paths mpc \
-  --build-base build/colcon --install-base build/install \
-  --packages-select path_follow_mpc --event-handlers console_direct+
-colcon --log-base build/log test-result \
-  --test-result-base build/colcon/path_follow_mpc --verbose
+colcon test --base-paths mpc sim --packages-select path_follow_mpc \
+  --event-handlers console_direct+
+colcon test-result --test-result-base build/path_follow_mpc --verbose
 
 # 或直接 CMake / CTest
 cmake -S mpc -B build/mpc -DCMAKE_BUILD_TYPE=Release
@@ -415,7 +492,7 @@ build/mpc/test_mpc
 
 核心测试覆盖：配置/非有限值校验、重复点和单点路径、角度跨 ±π、精确运动学、四底盘直线/圆弧闭环、全向横移、差速原地转向、输出边界与变化率、预测输出形状。八个路径闭环从 0.35 m 横向偏差开始，要求 220 步内达到默认 0.08 m / 0.15 rad 容差，初始 20 步后横向 RMS < 0.12 m，并打印实际误差与求解耗时。另验证四轮转向的前后轴无侧滑方程、同相/反相/仅前轮转向、非对称参考点、蟹行保持朝向、较严格的横速/角速度/后转角/后转角速率约束。
 
-ROS 集成测试使用独立 ROS domain 和 localhost，覆盖：四种输出消息、原生消息的前后轴转角和时间戳、四轮转向 Twist 蟹行横速、模型与消息类型不匹配拒绝、TF 成功/失败、里程计失联与旧时间戳、取消/启停、无效路径、到达锁存、路径过期。原生阿克曼和四轮转向输出均实际进行发布订阅与停车验证。测试没有替代实车和带延迟/噪声的动力学验证。
+ROS 集成测试使用独立 ROS domain 和 localhost，覆盖：四种输出消息、原生消息的前后轴转角和时间戳、四轮转向 Twist 蟹行横速、模型与消息类型不匹配拒绝、TF 成功/失败、里程计失联与旧时间戳、取消/启停、无效路径、到达锁存、路径过期。原生阿克曼和四轮转向输出均实际进行发布订阅与停车验证。此处核心/ROS 测试不替代 Gazebo 物理回归或实车测试；Gazebo 测试命令见 [仿真包文档](../sim/path_follow_sim/README.md#测试)。
 
 ## 7. 不依赖 ROS 的移植
 
@@ -497,16 +574,16 @@ ROS 回调使用单线程执行器，核心无需锁；如果后续改为多线�
 
 ### 8.4 常见问题定位
 
-| 现象 | 优先排查 |
-|---|---|
-| 一直零速 | 先看 `mpc/status`；检查 enabled、路径、里程计频率/时间戳及 TF，不要直接增大权重 |
-| 一发路径就报姿态错误 | 检查四元数是否全零；无旋转应设 `orientation.w=1.0` |
-| 转向方向反了 | 核对弧度/角度、左右符号、驱动是否把角速度当转角 |
-| 四轮转向反相转弯却异常侧滑 | 检查前/后轴转角符号、参考点及 `lf/lr`，并确认驱动做了左右轮分配 |
-| 蟹行时车身被强制转向路径方向 | 检查 chassis 是否四轮转向，以及路径 yaw 是否真的保持不变 |
-| 靠近终点不完成 | 同时检查位置和 yaw；四轮转向/阿克曼无法原地补末端航向，可能需要重新规划 |
-| 新模型输出无后轮命令 | 不要使用 AckermannDriveStamped 承载四轮转向；选自定义消息 |
-| 控制偶尔变零 | 查看是否求解超过 dt、TF 等待或里程计过期；减小 horizon/迭代量前先测耗时 |
+| 现象                         | 优先排查                                                                          |
+| ---------------------------- | --------------------------------------------------------------------------------- |
+| 一直零速                     | 先看 `mpc/status`；检查 enabled、路径、里程计频率/时间戳及 TF，不要直接增大权重 |
+| 一发路径就报姿态错误         | 检查四元数是否全零；无旋转应设 `orientation.w=1.0`                              |
+| 转向方向反了                 | 核对弧度/角度、左右符号、驱动是否把角速度当转角                                   |
+| 四轮转向反相转弯却异常侧滑   | 检查前/后轴转角符号、参考点及 `lf/lr`，并确认驱动做了左右轮分配                 |
+| 蟹行时车身被强制转向路径方向 | 检查 chassis 是否四轮转向，以及路径 yaw 是否真的保持不变                          |
+| 靠近终点不完成               | 同时检查位置和 yaw；四轮转向/阿克曼无法原地补末端航向，可能需要重新规划           |
+| 新模型输出无后轮命令         | 不要使用 AckermannDriveStamped 承载四轮转向；选自定义消息                         |
+| 控制偶尔变零                 | 查看是否求解超过 dt、TF 等待或里程计过期；减小 horizon/迭代量前先测耗时           |
 
 ### 8.5 扩展接口而不破坏核心
 

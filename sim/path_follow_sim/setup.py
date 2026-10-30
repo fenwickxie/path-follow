@@ -9,8 +9,11 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml', 'README.md']),
-        ('share/' + package_name + '/launch', ['launch/sim.launch.py']),
+        ('share/' + package_name + '/launch', [
+            'launch/sim.launch.py', 'launch/gazebo.launch.py', 'launch/publish_path.launch.py']),
         ('share/' + package_name + '/config', ['config/sim.yaml']),
+        ('share/' + package_name + '/rviz', ['rviz/simulation.rviz']),
+        ('share/' + package_name + '/worlds', ['worlds/tracking.world']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -18,6 +21,7 @@ setup(
         'console_scripts': [
             'sim_robot = path_follow_sim.sim_node:main',
             'scenario_publisher = path_follow_sim.scenario_node:main',
+            'path_publisher = path_follow_sim.scenario_node:main',
             'metrics_recorder = path_follow_sim.metrics_node:main',
             'sdf_to_params = path_follow_sim.sdf_model:main',
             'plot_result = path_follow_sim.plot_result:main',

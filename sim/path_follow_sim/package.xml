@@ -16,6 +16,9 @@
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <!-- 仅当 cmd_type 为 ackermann / four_wheel_steering 时才会被导入 -->
   <exec_depend>ackermann_msgs</exec_depend>
   <exec_depend>path_follow_mpc</exec_depend>

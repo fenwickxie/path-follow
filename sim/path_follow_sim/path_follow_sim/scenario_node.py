@@ -6,7 +6,9 @@
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
+from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Empty
 
 from . import scenarios
@@ -22,16 +24,29 @@ class ScenarioPublisher(Node):
         topic = d('topic', 'plan').value
         self.spacing = d('spacing', 0.05).value
         self.start_delay = d('start_delay', 2.0).value
+        transient_local = d('transient_local', True).value
+        self.wait_for_subscriber = d('wait_for_subscriber', False).value
         keep = d('keep_heading', False).value
         self.keep_heading = d('heading', 0.0).value if keep else None
         self.params = {k: d(f'params.{k}', v).value for k, v in scenarios.DEFAULTS.items()}
         self.points = scenarios.generate(self.kind, self.spacing, self.keep_heading, **self.params)
-        self.pub = self.create_publisher(Path, topic, 10)
+        qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=(DurabilityPolicy.TRANSIENT_LOCAL if transient_local
+                        else DurabilityPolicy.VOLATILE))
+        self.pub = self.create_publisher(Path, topic, qos)
         self.create_service(Empty, '~/publish', self._on_publish)
-        self.timer = self.create_timer(max(self.start_delay, 0.1), self._first)
+        period = 0.1 if self.wait_for_subscriber else max(self.start_delay, 0.1)
+        self.timer = self.create_timer(period, self._first)
+        self.ready_at = self.get_clock().now() + Duration(seconds=max(0.0, self.start_delay))
         self.get_logger().info(f'scenario={self.kind} points={len(self.points)} -> {topic}')
 
     def _first(self):
+        if self.get_clock().now() < self.ready_at:
+            return
+        if self.wait_for_subscriber and self.pub.get_subscription_count() == 0:
+            return
         self.timer.cancel()
         self.publish()
 
